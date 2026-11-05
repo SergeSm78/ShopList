@@ -287,10 +287,10 @@ fun ViewCard(r: Repo, id: Long, back: () -> Unit, edit: () -> Unit, onFull: (Int
                     }
                     if (n > 1) {
                         val pg = pager.currentPage
-                        if (pg > 0) Arrow(Icons.AutoMirrored.Filled.ArrowBack, Modifier.align(Alignment.CenterStart)) {
+                        if (pg > 0) Arrow(Icons.Default.ArrowBack, Modifier.align(Alignment.CenterStart)) {
                             scope.launch { pager.animateScrollToPage(pg - 1) }
                         }
-                        if (pg < n - 1) Arrow(Icons.AutoMirrored.Filled.ArrowForward, Modifier.align(Alignment.CenterEnd)) {
+                        if (pg < n - 1) Arrow(Icons.Default.ArrowForward, Modifier.align(Alignment.CenterEnd)) {
                             scope.launch { pager.animateScrollToPage(pg + 1) }
                         }
                         Text("${pg + 1}/$n", Modifier.align(Alignment.BottomCenter).padding(4.dp)
