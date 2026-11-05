@@ -44,10 +44,22 @@ import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import kotlinx.coroutines.launch
 import java.io.File
 
 data class Item(
-    val id: Long, val name: String, val desc: String = "", val image: String? = null,
+    val id: Long, val name: String, val desc: String = "", val images: List<String> = emptyList(),
     val qty: String = "1", val active: Boolean = true, val created: Long, val activity: Long
 )
 
@@ -74,7 +86,7 @@ class Repo(val ctx: Context) {
     }
     fun delete(id: Long) {
         items.firstOrNull { it.id == id }?.let { i ->
-            i.image?.let { file(it).delete() }
+            i.images.forEach { file(it).delete() }
             items.remove(i); save()
         }
     }
@@ -84,21 +96,25 @@ class Repo(val ctx: Context) {
         a.put(JSONObject().apply {
             put("id", i.id); put("name", i.name); put("desc", i.desc); put("qty", i.qty)
             put("active", i.active); put("created", i.created); put("activity", i.activity)
-            if (i.image != null) {
-                if (withImg) put("img64", Base64.encodeToString(file(i.image).readBytes(), Base64.NO_WRAP))
-                else put("image", i.image)
-            }
+            put(if (withImg) "images64" else "images", JSONArray().also { arr -> i.images.forEach { n ->
+                arr.put(if (withImg) Base64.encodeToString(file(n).readBytes(), Base64.NO_WRAP) else n) } })
         })
     } }
 
     private fun parse(a: JSONArray, imp: Boolean) = (0 until a.length()).map { k ->
         val o = a.getJSONObject(k)
-        var img = o.optString("image", "").ifEmpty { null }
-        if (imp && o.has("img64")) {
-            img = "img_${System.nanoTime()}.jpg"
-            file(img).writeBytes(Base64.decode(o.getString("img64"), Base64.DEFAULT))
+        val imgs = mutableListOf<String>()
+        fun arr(key: String) = o.optJSONArray(key)?.let { a2 -> (0 until a2.length()).map { a2.getString(it) } } ?: emptyList()
+        if (imp) {
+            val b64 = arr("images64") + listOfNotNull(o.optString("img64", "").ifEmpty { null })
+            b64.forEach { b ->
+                val n = "img_${System.nanoTime()}.jpg"
+                file(n).writeBytes(Base64.decode(b, Base64.DEFAULT)); imgs.add(n)
+            }
+        } else {
+            imgs.addAll(arr("images")); o.optString("image", "").ifEmpty { null }?.let { imgs.add(it) }
         }
-        Item(o.getLong("id"), o.getString("name"), o.optString("desc"), img, o.optString("qty", "1"),
+        Item(o.getLong("id"), o.getString("name"), o.optString("desc"), imgs, o.optString("qty", "1"),
             o.optBoolean("active", true), o.getLong("created"), o.getLong("activity"))
     }
 
@@ -161,11 +177,15 @@ fun App(r: Repo) {
     var tab by remember { mutableIntStateOf(0) }
     var view by remember { mutableStateOf<Long?>(null) }
     var edit by remember { mutableStateOf<Long?>(null) }
-    BackHandler(view != null || edit != null) { if (edit != null) edit = null else view = null }
+    var full by remember { mutableStateOf<Pair<Long, Int>?>(null) }
+    BackHandler(full != null || view != null || edit != null) {
+        if (full != null) full = null else if (edit != null) edit = null else view = null
+    }
+    Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
         when {
             edit != null -> EditCard(r, edit!!) { edit = null }
-            view != null -> ViewCard(r, view!!, { view = null }, { edit = view })
+            view != null -> ViewCard(r, view!!, { view = null }, { edit = view }, { full = view!! to it })
             else -> {
                 Row(Modifier.fillMaxWidth().height(44.dp)) {
                     listOf("Actual", "History").forEachIndexed { i, t ->
@@ -181,6 +201,11 @@ fun App(r: Repo) {
                 if (tab == 2) Settings(r) else ListScreen(r, tab == 0) { view = it }
             }
         }
+    }
+    full?.let { (fid, idx) ->
+        val fname = r.items.firstOrNull { it.id == fid }?.images?.getOrNull(idx)
+        if (fname != null) Box(Modifier.fillMaxSize().background(Color.Black)) { ZoomImage(r, fname) { full = null } }
+    }
     }
 }
 
@@ -215,7 +240,7 @@ fun ListScreen(r: Repo, active: Boolean, open: (Long) -> Unit) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 FilledTonalIconButton({ r.toggle(i.id) }) { Icon(if (active) Icons.Default.Check else Icons.Default.Add, if (active) "Done" else "Restore") }
                 Text(i.name, Modifier.weight(1f).clickable { open(i.id) }.padding(12.dp), style = MaterialTheme.typography.bodyLarge)
-                Pic(r, i.image, Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)), sample = 4)
+                Pic(r, i.images.firstOrNull(), Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)), sample = 4)
                 Spacer(Modifier.width(8.dp))
                 if (!active) {
                     IconButton({ del = i }, Modifier.width(56.dp)) { Icon(Icons.Default.Delete, "Delete") }
@@ -242,18 +267,72 @@ fun ListScreen(r: Repo, active: Boolean, open: (Long) -> Unit) {
 }
 
 @Composable
-fun ViewCard(r: Repo, id: Long, back: () -> Unit, edit: () -> Unit) {
+fun Arrow(icon: ImageVector, mod: Modifier, click: () -> Unit) {
+    IconButton(click, mod.padding(4.dp).background(Color(0x66000000), CircleShape)) { Icon(icon, null, tint = Color.White) }
+}
+
+@Composable
+fun ViewCard(r: Repo, id: Long, back: () -> Unit, edit: () -> Unit, onFull: (Int) -> Unit) {
     val item = r.items.firstOrNull { it.id == id } ?: return back()
+    val scope = rememberCoroutineScope()
     Column(Modifier.fillMaxSize()) {
-    IconButton(back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp)) {
-        if (item.image != null) Pic(r, item.image, Modifier.fillMaxWidth().heightIn(max = 360.dp), crop = ContentScale.Fit)
-        Spacer(Modifier.height(12.dp))
-        Text(item.name, style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(8.dp))
-        Text(item.desc, style = MaterialTheme.typography.bodyLarge)
+        IconButton(back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp)) {
+            val n = item.images.size
+            if (n > 0) {
+                val pager = rememberPagerState { item.images.size }
+                Box(Modifier.fillMaxWidth().height(300.dp)) {
+                    HorizontalPager(pager, Modifier.fillMaxSize()) { p ->
+                        Pic(r, item.images[p], Modifier.fillMaxSize().clickable { onFull(p) }, crop = ContentScale.Fit)
+                    }
+                    if (n > 1) {
+                        val pg = pager.currentPage
+                        if (pg > 0) Arrow(Icons.AutoMirrored.Filled.ArrowBack, Modifier.align(Alignment.CenterStart)) {
+                            scope.launch { pager.animateScrollToPage(pg - 1) }
+                        }
+                        if (pg < n - 1) Arrow(Icons.AutoMirrored.Filled.ArrowForward, Modifier.align(Alignment.CenterEnd)) {
+                            scope.launch { pager.animateScrollToPage(pg + 1) }
+                        }
+                        Text("${pg + 1}/$n", Modifier.align(Alignment.BottomCenter).padding(4.dp)
+                            .background(Color(0x66000000), RoundedCornerShape(10.dp)).padding(horizontal = 8.dp, vertical = 2.dp), color = Color.White)
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(item.name, style = MaterialTheme.typography.headlineMedium)
+            Spacer(Modifier.height(8.dp))
+            Text(item.desc, style = MaterialTheme.typography.bodyLarge)
+        }
+        Button(edit, Modifier.fillMaxWidth().padding(16.dp)) { Icon(Icons.Default.Edit, null); Spacer(Modifier.width(8.dp)); Text("Edit") }
     }
-    Button(edit, Modifier.fillMaxWidth().padding(16.dp)) { Icon(Icons.Default.Edit, null); Spacer(Modifier.width(8.dp)); Text("Edit") }
+}
+
+@Composable
+fun ZoomImage(r: Repo, name: String, close: () -> Unit) {
+    var scale by remember { mutableFloatStateOf(1f) }
+    var off by remember { mutableStateOf(Offset.Zero) }
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    fun clamp(o: Offset, s: Float): Offset {
+        val mx = size.width * (s - 1) / 2; val my = size.height * (s - 1) / 2
+        return Offset(o.x.coerceIn(-mx, mx), o.y.coerceIn(-my, my))
+    }
+    Box(Modifier.fillMaxSize().onSizeChanged { size = it }
+        .pointerInput(Unit) {
+            detectTapGestures(onTap = { close() }, onDoubleTap = {
+                if (scale > 1f) { scale = 1f; off = Offset.Zero } else scale = 2.5f
+            })
+        }
+        .pointerInput(Unit) {
+            detectTransformGestures { c, pan, zoom, _ ->
+                val ns = (scale * zoom).coerceIn(1f, 6f)
+                val cc = c - Offset(size.width / 2f, size.height / 2f)
+                off = clamp((off - cc) * (ns / scale) + cc + pan, ns)
+                scale = ns
+            }
+        }) {
+        Pic(r, name, Modifier.fillMaxSize().graphicsLayer {
+            scaleX = scale; scaleY = scale; translationX = off.x; translationY = off.y
+        }, crop = ContentScale.Fit)
     }
 }
 
@@ -261,29 +340,41 @@ fun ViewCard(r: Repo, id: Long, back: () -> Unit, edit: () -> Unit) {
 fun EditCard(r: Repo, id: Long, done: () -> Unit) {
     val ctx = LocalContext.current
     val item = r.items.firstOrNull { it.id == id } ?: return done()
+    val orig = remember { item.images }
     var name by remember { mutableStateOf(item.name) }
     var desc by remember { mutableStateOf(item.desc) }
-    var image by remember { mutableStateOf(item.image) }
+    val images = remember { mutableStateListOf<String>().apply { addAll(item.images) } }
+    var saved by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) { onDispose { if (!saved) images.filter { it !in orig }.forEach { r.file(it).delete() } } }
     var camUri by remember { mutableStateOf<Uri?>(null) }
-    val gallery = rememberLauncherForActivityResult(GetContent()) { u -> u?.let { r.importImage(it)?.let { n -> image = n } } }
-    val cam = rememberLauncherForActivityResult(TakePicture()) { ok -> if (ok) camUri?.let { r.importImage(it)?.let { n -> image = n } } }
+    val gallery = rememberLauncherForActivityResult(GetMultipleContents()) { us -> us.forEach { u -> r.importImage(u)?.let { images.add(it) } } }
+    val cam = rememberLauncherForActivityResult(TakePicture()) { ok -> if (ok) camUri?.let { r.importImage(it)?.let { n -> images.add(n) } } }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Pic(r, image, Modifier.fillMaxWidth().height(240.dp), crop = ContentScale.Fit)
+        if (images.isNotEmpty()) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            images.toList().forEach { n ->
+                Box {
+                    Pic(r, n, Modifier.size(100.dp).clip(RoundedCornerShape(8.dp)), sample = 2)
+                    IconButton({ images.remove(n) }, Modifier.align(Alignment.TopEnd).padding(4.dp).size(28.dp).background(Color(0x99000000), CircleShape)) {
+                        Icon(Icons.Default.Close, "Remove", tint = Color.White, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton({
                 val f = File(ctx.cacheDir, "cam.jpg")
                 camUri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fp", f); cam.launch(camUri!!)
             }) { Text("Camera") }
-            OutlinedButton({ gallery.launch("image/*") }) { Text("File") }
-            if (image != null) OutlinedButton({ image = null }) { Icon(Icons.Default.Delete, "Remove image") }
+            OutlinedButton({ gallery.launch("image/*") }) { Text("Add from files") }
         }
         OutlinedTextField(name, { name = it }, Modifier.fillMaxWidth(), label = { Text("Name") }, singleLine = true)
         OutlinedTextField(desc, { desc = it }, Modifier.fillMaxWidth().heightIn(min = 120.dp), label = { Text("Description") })
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(done, Modifier.weight(1f)) { Text("Cancel") }
             Button({
-                if (image != item.image) item.image?.let { r.file(it).delete() }
-                r.update(id) { it.copy(name = name.ifBlank { it.name }, desc = desc, image = image) }
+                saved = true
+                orig.filter { it !in images }.forEach { r.file(it).delete() }
+                r.update(id) { it.copy(name = name.ifBlank { it.name }, desc = desc, images = images.toList()) }
                 done()
             }, Modifier.weight(1f)) { Text("Save") }
         }
